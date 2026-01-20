@@ -15,7 +15,7 @@ use Typecho\Widget\Helper\Form;
  *
  * @package    CategoryBatchManager
  * @author     璇
- * @version    1.0.0
+ * @version    1.1.0
  * @link       https://github.com/BXCQ/CategoryBatchManager
  */
 class CategoryBatchManager_Plugin implements PluginInterface
@@ -81,16 +81,26 @@ class CategoryBatchManager_Plugin implements PluginInterface
     public static function renderFooter()
     {
         $scriptName = basename($_SERVER['SCRIPT_NAME'] ?? '');
-        if ('manage-posts.php' !== $scriptName) {
-            // 仅在文章管理列表页注入
-            return;
+        $options = \Helper::options();
+
+        // 在文章管理列表页注入批量操作功能
+        if ('manage-posts.php' === $scriptName) {
+            $actionUrl = \Typecho\Common::url('action/category-batch', $options->index);
+            \Widget\Metas\Category\Rows::alloc()->to($category);
+            self::renderPostsPageScripts($actionUrl, $category, $options);
         }
 
-        $options = \Helper::options();
-        $actionUrl = \Typecho\Common::url('action/category-batch', $options->index);
+        // 在分类管理页面注入刷新按钮
+        if ('manage-categories.php' === $scriptName) {
+            self::renderCategoriesPageButton($options);
+        }
+    }
 
-        // 获取所有分类，按层级输出
-        \Widget\Metas\Category\Rows::alloc()->to($category);
+    /**
+     * 渲染文章管理页面的批量操作功能
+     */
+    private static function renderPostsPageScripts($actionUrl, $category, $options)
+    {
         ?>
 <style>
 .cbm-mask {
@@ -503,6 +513,37 @@ class CategoryBatchManager_Plugin implements PluginInterface
             cell.appendChild(document.createTextNode(' '));
             cell.appendChild(link);
         }
+    }
+})();
+</script>
+<?php
+    }
+
+    /**
+     * 渲染分类管理页面的刷新按钮
+     */
+    private static function renderCategoriesPageButton($options)
+    {
+        $refreshUrl = \Typecho\Common::url('action/category-batch?do=refreshAll', $options->index);
+        ?>
+<script>
+(function() {
+    // 在分类管理页面顶部添加“刷新计数”按钮
+    var refreshUrl = <?php echo json_encode($refreshUrl); ?>;
+    var operate = document.querySelector('.typecho-list-operate .operate');
+    if (operate) {
+        var btn = document.createElement('a');
+        btn.href = refreshUrl;
+        btn.className = 'btn btn-s';
+        btn.textContent = '<?php _e('刷新分类计数'); ?>';
+        btn.title = '<?php _e('重新统计所有分类的文章数量'); ?>';
+        btn.style.marginLeft = '5px';
+        btn.addEventListener('click', function(e) {
+            if (!confirm('<?php _e('确认要刷新所有分类的文章计数吗？'); ?>')) {
+                e.preventDefault();
+            }
+        });
+        operate.appendChild(btn);
     }
 })();
 </script>
