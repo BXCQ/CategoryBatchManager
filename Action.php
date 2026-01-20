@@ -37,9 +37,10 @@ class CategoryBatchManager_Action extends Typecho_Widget implements Widget_Inter
         }
 
         $this->on($this->request->is('do=batch'))->batch();
+        $this->on($this->request->is('do=refreshAll'))->refreshAllCategoryCount();
 
         // 如果没有匹配的操作，返回 400
-        if (!$this->request->is('do=batch')) {
+        if (!$this->request->is('do=batch') && !$this->request->is('do=refreshAll')) {
             $this->response->throwJson([
                 'success' => false,
                 'message' => '无效的操作',
@@ -99,6 +100,8 @@ class CategoryBatchManager_Action extends Typecho_Widget implements Widget_Inter
         $db = $this->db;
 
         try {
+            $affectedMids = []; // 记录所有被影响的分类 mid
+
             foreach ($cids as $cid) {
                 if (!$cid) {
                     continue;
@@ -106,20 +109,34 @@ class CategoryBatchManager_Action extends Typecho_Widget implements Widget_Inter
 
                 if ('move' === $op) {
                     // 先移除该文章所有分类关系
+                    $oldMids = $this->getPostCategoryMids($cid);
                     $this->deleteAllCategoriesOfPost($cid);
 
                     // 再统一插入新的分类
                     foreach ($validMids as $mid) {
                         $this->insertRelationIfNotExists($cid, $mid);
                     }
+
+                    // 记录旧分类和新分类都需要更新计数
+                    $affectedMids = array_merge($affectedMids, $oldMids, $validMids);
                 } elseif ('add' === $op) {
                     foreach ($validMids as $mid) {
                         $this->insertRelationIfNotExists($cid, $mid);
                     }
+                    $affectedMids = array_merge($affectedMids, $validMids);
                 } elseif ('remove' === $op) {
                     foreach ($validMids as $mid) {
                         $this->deleteRelationIfExists($cid, $mid);
                     }
+                    $affectedMids = array_merge($affectedMids, $validMids);
+                }
+            }
+
+            // 更新所有受影响分类的文章计数
+            $affectedMids = array_unique($affectedMids);
+            foreach ($affectedMids as $mid) {
+                if ($mid) {
+                    $this->refreshCategoryCount($mid);
                 }
             }
         } catch (\Exception $e) {
@@ -151,6 +168,27 @@ class CategoryBatchManager_Action extends Typecho_Widget implements Widget_Inter
                 ->from('table.metas')
                 ->where('type = ?', 'category')
                 ->where('mid IN ?', $mids)
+        );
+
+        return array_map(function ($row) {
+            return (int)$row['mid'];
+        }, $rows);
+    }
+
+    /**
+     * 获取文章当前所有分类 mid
+     *
+     * @param int $cid
+     * @return array
+     */
+    private function getPostCategoryMids(int $cid): array
+    {
+        $rows = $this->db->fetchAll(
+            $this->db->select('table.relationships.mid')
+                ->from('table.relationships')
+                ->join('table.metas', 'table.metas.mid = table.relationships.mid')
+                ->where('table.relationships.cid = ?', $cid)
+                ->where('table.metas.type = ?', 'category')
         );
 
         return array_map(function ($row) {
@@ -218,5 +256,65 @@ class CategoryBatchManager_Action extends Typecho_Widget implements Widget_Inter
                 ->where('cid = ?', $cid)
                 ->where('mid = ?', $mid)
         );
+    }
+
+    /**
+     * 刷新分类的文章计数（更新 metas 表的 count 字段）
+     *
+     * @param int $mid
+     */
+    private function refreshCategoryCount(int $mid): void
+    {
+        // 统计该分类下已发布的文章数量
+        $num = $this->db->fetchObject(
+            $this->db->select(['COUNT(table.contents.cid)' => 'num'])
+                ->from('table.contents')
+                ->join('table.relationships', 'table.contents.cid = table.relationships.cid')
+                ->where('table.relationships.mid = ?', $mid)
+                ->where('table.contents.type = ?', 'post')
+                ->where('table.contents.status = ?', 'publish')
+        )->num;
+
+        // 更新 metas 表中该分类的 count 字段
+        $this->db->query(
+            $this->db->update('table.metas')->rows(['count' => $num])
+                ->where('mid = ?', $mid)
+        );
+    }
+
+    /**
+     * 刷新所有分类的文章计数
+     */
+    public function refreshAllCategoryCount()
+    {
+        try {
+            // 获取所有分类
+            $categories = $this->db->fetchAll(
+                $this->db->select('mid')
+                    ->from('table.metas')
+                    ->where('type = ?', 'category')
+            );
+
+            $count = 0;
+            foreach ($categories as $category) {
+                $mid = (int)$category['mid'];
+                $this->refreshCategoryCount($mid);
+                $count++;
+            }
+
+            // 设置成功提示
+            \Typecho_Widget::widget('Widget_Notice')->set(
+                _t('已成功刷新 %d 个分类的文章计数', $count),
+                'success'
+            );
+        } catch (\Exception $e) {
+            \Typecho_Widget::widget('Widget_Notice')->set(
+                _t('刷新失败：%s', $e->getMessage()),
+                'error'
+            );
+        }
+
+        // 返回分类管理页面
+        $this->response->redirect(\Helper::options()->adminUrl . 'manage-categories.php');
     }
 }
